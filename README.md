@@ -1,11 +1,11 @@
 # Pipelock Agent Egress Action
 
-[![CI](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/ci.yml/badge.svg)](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/codeql.yml/badge.svg)](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/codeql.yml)
-[![Lint](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/lint.yml/badge.svg)](https://github.com/luckyPipewrench/pipelock-agent-egress-action/actions/workflows/lint.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/luckyPipewrench/pipelock-agent-egress-action/badge)](https://scorecard.dev/viewer/?uri=github.com/luckyPipewrench/pipelock-agent-egress-action)
+[![CI](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/ci.yml/badge.svg)](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/codeql.yml/badge.svg)](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/codeql.yml)
+[![Lint](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/lint.yml/badge.svg)](https://github.com/pipelab-org/pipelock-agent-egress-action/actions/workflows/lint.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/pipelab-org/pipelock-agent-egress-action/badge)](https://scorecard.dev/viewer/?uri=github.com/pipelab-org/pipelock-agent-egress-action)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Latest Release](https://img.shields.io/github/v/release/luckyPipewrench/pipelock-agent-egress-action)](https://github.com/luckyPipewrench/pipelock-agent-egress-action/releases)
+[![Latest Release](https://img.shields.io/github/v/release/pipelab-org/pipelock-agent-egress-action)](https://github.com/pipelab-org/pipelock-agent-egress-action/releases)
 
 Verifiable Egress Control is the missing CI primitive for AI agents. Run the agent script, control what leaves the runner, verify the receipts, produce an Audit Packet a third party can inspect. Pipelock is staking that category as an open-source agent firewall with mediator-signed action receipts from outside the agent trust boundary.
 
@@ -66,7 +66,7 @@ The Audit Packet is evidence about traffic that crossed the Pipelock control poi
 
 A missing receipt is not a proof of absence. The packet does not enumerate traffic Pipelock should have seen but didn't. Complement with runner-level network telemetry if the threat model needs negative-space evidence.
 
-The canonical text on what a verified packet proves and does not prove is in [pipelock/docs/security/audit-packet-threat-model.md](https://github.com/luckyPipewrench/pipelock/blob/main/docs/security/audit-packet-threat-model.md).
+The canonical text on what a verified packet proves and does not prove is in [pipelock/docs/security/audit-packet-threat-model.md](https://github.com/pipelab-org/pipelock/blob/main/docs/security/audit-packet-threat-model.md).
 
 ## Action interface
 
@@ -133,8 +133,8 @@ This repo is pre-release. The first useful milestone is not a polished Marketpla
 
 Track development in this repo and in Pipelock:
 
-- https://github.com/luckyPipewrench/pipelock-agent-egress-action
-- https://github.com/luckyPipewrench/pipelock
+- https://github.com/pipelab-org/pipelock-agent-egress-action
+- https://github.com/pipelab-org/pipelock
 - https://pipelab.org/learn/action-receipt-spec/
 
 ## Pull request reviews
@@ -145,7 +145,7 @@ The caller runs from the default branch and passes matching immutable workflow a
 
 The read-only caller check runs when the caller workflow, its contract test, or the check workflow changes. It checks the local caller shape and matching pins; it does not execute the external reviewer. The legacy local-runner tests do not define this caller contract.
 
-For source updates and recovery, follow the [shared reviewer guide](https://github.com/luckyPipewrench/pipelock/blob/3e8534e0dd621c62879238cc01d56f7e58e9d096/docs/guides/pr-review.md). A caller change takes effect after it reaches the default branch; a review of its own PR still uses the previous caller.
+For source updates and recovery, follow the [shared reviewer guide](https://github.com/pipelab-org/pipelock/blob/3e8534e0dd621c62879238cc01d56f7e58e9d096/docs/guides/pr-review.md). A caller change takes effect after it reaches the default branch; a review of its own PR still uses the previous caller.
 
 ## License
 
