@@ -1,0 +1,7 @@
+[review]
+instructions = """
+Review the GitHub action for correct shell quoting, input validation, containment setup, fail-closed egress behavior, and evidence handling. Keep action inputs and outputs compatible.
+"""
+
+[ignore]
+glob = ["**/go.sum"]
