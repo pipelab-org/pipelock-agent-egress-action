@@ -168,7 +168,7 @@ jobs:
 
 # These digests approve the complete shared-review installation as one state.
 # They bind repository data and executable validation to the reviewed migration.
-SHARED_FILES = {'.github/workflows/agent-review.yaml': '644f8a65d0dad6ff62d2502f48650b7a94fb6ae97afad65f96fda042c584caea', '.github/agent-review.toml': '87602a77543d26a5c922f15d87c72177743874339579c666a38a2c82698fab69', '.github/workflows/review-caller-contract.yaml': 'd304bf0150b7f48dac125f4e697a6c9f3798298f616e1b230707dc9ec9b43895', 'scripts/check_agent_review_workflow.py': '969a0930c2aa64e1eff3782144c08646de4f16bd060e8d48ee54ad10a20255ae'}
+SHARED_FILES = {'.github/workflows/agent-review.yaml': '644f8a65d0dad6ff62d2502f48650b7a94fb6ae97afad65f96fda042c584caea', '.github/agent-review.toml': '87602a77543d26a5c922f15d87c72177743874339579c666a38a2c82698fab69', '.github/workflows/review-caller-contract.yaml': '82d47411b79ddf72af766ae224beb4c95b89585d288b5e1120380c0bbfe91f97', 'scripts/check_agent_review_workflow.py': '47a28ead78ef6729032a6acc3b1576bc7c8eacf1f5f3a8b3f7c8fa59ec33d195'}
 MIGRATED_WORKFLOWS = ('.github/workflows/agent-review.yaml', '.github/workflows/ci.yml', '.github/workflows/codeql.yml', '.github/workflows/lint.yml', '.github/workflows/review-caller-contract.yaml', '.github/workflows/scorecard.yml')
 
 
