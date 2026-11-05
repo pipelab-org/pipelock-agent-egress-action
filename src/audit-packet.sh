@@ -208,8 +208,13 @@ receipt_count = 0
 policy_hashes: set[str] = set()
 transports: dict[str, int] = {}
 
-with evidence_path.open("r", encoding="utf-8") as fh:
-    for line in fh:
+with evidence_path.open("rb") as fh:
+    for raw in fh:
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # A torn export can end inside a UTF-8 sequence; same rule as run.sh.
+            continue
         if not line.strip():
             continue
         try:

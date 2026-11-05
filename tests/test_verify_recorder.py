@@ -209,7 +209,7 @@ exec "$@"
                 self.assertIn("simulated export failure", output)
                 self.assertIn("could not export recorder shards", output)
 
-    def start_launcher(self, *, ignore_term=False, capture=True):
+    def start_launcher(self, *, ignore_term=False, capture=True, monitor=False):
         writer = self.bin / "recorder"
         writer.write_text('''#!/usr/bin/env python3
 import os
@@ -233,8 +233,14 @@ while True:
         launcher.write_text('''import os
 import signal
 import subprocess
+import sys
 
-child = subprocess.Popen([os.environ["RUNTIME_BIN"], os.environ["WRITER"]])
+# With LAUNCHER_MONITOR, a non-recorder process (bash) sits between the
+# launcher and the recorder, as sudo's use_pty monitor does.
+argv = [os.environ["RUNTIME_BIN"], os.environ["WRITER"]]
+if os.environ.get("LAUNCHER_MONITOR") == "true":
+    argv = ["bash", "-c", '"$0" "$1" & wait $!'] + argv
+child = subprocess.Popen(argv)
 signal.signal(signal.SIGTERM, lambda signum, frame: child.send_signal(signum))
 child.wait()
 ''')
@@ -244,6 +250,7 @@ child.wait()
                         BASH_VERIFIER=str(self.bin / "pipelock"),
                         LAUNCHER=str(launcher), READY_PIPE=str(fifo),
                         IGNORE_TERM="true" if ignore_term else "false",
+                        LAUNCHER_MONITOR="true" if monitor else "false",
                         CHILD_PID_FILE=str(self.work / "child.pid"))
 
         def cleanup_child():
@@ -407,12 +414,54 @@ trap - EXIT
         self.assertEqual(audit["summary"]["receipt_count"], 2)
         self.assertEqual(audit["verifier"]["receipt_count"], 2)
 
+    def test_torn_utf8_export_line_is_skipped_by_both_counters(self):
+        record = {"type": "action_receipt", "detail": {"action_record": {"verdict": "allow"}}}
+        export = self.work / "torn.jsonl"
+        # The second line ends inside a three-byte UTF-8 sequence.
+        export.write_bytes(json.dumps(record).encode() + b"\n" + b'{"type": "action_receipt", "note": "\xe2\x82')
+        # The receipt counter is inline in run.sh; run that exact script.
+        run_sh = (ROOT / "src/run.sh").read_text()
+        start = run_sh.index("RECEIPT_COUNT=\"$(python3 - \"$EVIDENCE_EXPORT\" <<'PY'\n")
+        body = run_sh[run_sh.index("\n", start) + 1:run_sh.index("\nPY\n", start)]
+        counted = subprocess.run(["python3", "-", str(export)], input=body, env=self.env,
+                                 capture_output=True, text=True, timeout=5)
+        self.assertEqual(counted.returncode, 0, counted.stderr)
+        self.assertEqual(counted.stdout.strip(), "1")
+        posture = self.work / "posture.json"
+        posture.write_text(json.dumps({
+            "enforcement_mode": "linux_namespace", "runner_os": "Linux",
+            "raw_socket_status": "denied", "docker_socket_status": "absent",
+            "dns_udp_status": "denied", "browser_proxy_status": "forced",
+            "websocket_frame_scanning": "explicit_ws_proxy_path_required",
+            "unsupported_paths": [],
+        }))
+        (self.work / "verifier.txt").write_text("VALID PREFIX, END UNPROVEN\n")
+        packet = self.work / "torn-packet"
+        result = subprocess.run([
+            "bash", str(ROOT / "src/audit-packet.sh"),
+            "--receipt-chain", str(export),
+            "--verifier-output", str(self.work / "verifier.txt"),
+            "--posture", str(posture), "--output-dir", str(packet),
+            "--run-started-at", "2026-11-05T00:00:00Z",
+            "--run-completed-at", "2026-11-05T00:01:00Z",
+            "--agent-identity", "test-recorder", "--agent-exit-code", "0",
+            "--verifier-verdict", "invalid",
+        ], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((packet / "packet.json").read_text())["summary"]["receipt_count"], 1)
+
     def test_stop_reaps_writer_before_export_and_verification(self):
         (self.evidence / RUN_SHARD).write_text("open\n")
         self.assertEqual(self.run_finalizer(self.start_launcher()), "valid")
         self.assert_child_stopped()
         self.assertEqual((self.work / "export.jsonl").read_text(), "closed\n")
         self.assert_argv()
+
+    def test_recorder_under_launcher_monitor_is_found_and_stopped(self):
+        (self.evidence / RUN_SHARD).write_text("open\n")
+        self.assertEqual(self.run_finalizer(self.start_launcher(monitor=True)), "valid")
+        self.assert_child_stopped()
+        self.assertEqual((self.work / "export.jsonl").read_text(), "closed\n")
 
 
 if __name__ == "__main__":

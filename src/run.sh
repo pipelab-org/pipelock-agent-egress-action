@@ -587,8 +587,14 @@ import json
 import sys
 
 count = 0
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    for line in fh:
+# A torn export can end inside a UTF-8 sequence; skip such a line like any
+# other malformed record instead of failing the step. audit-packet.sh matches.
+with open(sys.argv[1], "rb") as fh:
+    for raw in fh:
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
         if not line.strip():
             continue
         try:

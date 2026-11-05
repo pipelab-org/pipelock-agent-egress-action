@@ -20,7 +20,17 @@ def state(pid):
 
 try:
     if action == "capture":
-        children = Path(f"/proc/{launcher}/task/{launcher}/children").read_text().split()
+        # sudo may run the command under a monitor process (use_pty), so
+        # search every descendant of the launcher, not only direct children.
+        children, pending = [], [launcher]
+        while pending:
+            parent = pending.pop()
+            try:
+                found = Path(f"/proc/{parent}/task/{parent}/children").read_text().split()
+            except FileNotFoundError:
+                continue
+            children.extend(found)
+            pending.extend(found)
         matches = []
         for pid in children:
             try:
