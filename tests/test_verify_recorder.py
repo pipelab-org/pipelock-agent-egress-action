@@ -161,6 +161,27 @@ printf '%s\\n' "$VERIFIER_VERDICT"
         self.assertEqual((self.work / "export.jsonl").read_text(),
                          "legacy0\nlegacy2\nlegacy10\nrun0\nrun2\nrun10\n")
 
+    def test_export_failure_never_verifies_partial_or_stale_evidence(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                (self.work / "export.jsonl").write_text("stale export\n")
+                self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == python3 ]]; then
+  if [[ "$PARTIAL_EXPORT" == true ]]; then
+    printf 'partial\\n' >"$EVIDENCE_EXPORT"
+  fi
+  printf 'simulated export failure\\n' >&2
+  exit 1
+fi
+exec "$@"
+''')
+                self.env["PARTIAL_EXPORT"] = "true" if partial else "false"
+                self.assertEqual(self.run_finalizer(), "error")
+                self.assertFalse((self.work / "argv").exists())
+                output = (self.work / "verifier.txt").read_text()
+                self.assertIn("simulated export failure", output)
+                self.assertIn("could not export recorder shards", output)
+
     def test_stop_reaps_writer_before_export_and_verification(self):
         writer = self.work / "writer.py"
         writer.write_text('''import signal

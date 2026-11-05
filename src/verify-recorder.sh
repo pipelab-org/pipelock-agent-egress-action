@@ -62,7 +62,7 @@ export_recorder_shards() {
   # is everything before the last dash. Pipelock before 3.6 records session
   # "proxy"; 3.6 and later record one "proxy.run.<hex>" session per process
   # start. Anything else in the directory is not part of this chain.
-  sudo python3 -I - "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" <<'PY' || true
+  sudo python3 -I - "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" <<'PY'
 import os
 import re
 import sys
@@ -89,7 +89,11 @@ finalize_recorder() {
     VERIFIER_VERDICT="error"
     printf 'no evidence directory found: %s\n' "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT"
   else
-    export_recorder_shards
+    if ! export_recorder_shards 2>"$VERIFIER_OUTPUT"; then
+      VERIFIER_VERDICT="error"
+      printf '\ncould not export recorder shards; evidence copy is incomplete\n' >>"$VERIFIER_OUTPUT"
+      return
+    fi
     sudo chown "$(id -u):$(id -g)" "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
     sudo chmod 0600 "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
     if [[ ! -s "$EVIDENCE_EXPORT" ]]; then
