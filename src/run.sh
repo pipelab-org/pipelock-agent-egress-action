@@ -48,6 +48,7 @@ KEYGEN_OUTPUT=""
 PIPELOCK_PID=""
 RECORDER_PID=""
 RECORDER_START_TIME=""
+HOST_UID=""
 AGENT_EXIT_CODE=0
 VERIFIER_VERDICT="error"
 RECEIPT_COUNT=0
@@ -110,8 +111,16 @@ bool_input() {
 cleanup() {
   set +e
   if ! stop_pipelock; then
-    note "recorder shutdown unconfirmed; preserving runtime resources for inspection"
-    return
+    # Evidence was already refused; teardown still has to happen so signing
+    # keys, users and sudoers entries never outlive the run. The recorder runs
+    # as the action's host user, so stop everything that user still runs.
+    note "recorder shutdown unconfirmed; forcing host-user processes down before teardown"
+    if [[ -n "$PIPELOCK_PID" ]]; then
+      sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
+    fi
+    if [[ -n "$HOST_UID" ]]; then
+      sudo pkill -KILL -u "$HOST_UID" >/dev/null 2>&1
+    fi
   fi
   sudo ip netns del "$NETNS" >/dev/null 2>&1
   sudo ip link del "$HOST_IF" >/dev/null 2>&1
@@ -163,6 +172,7 @@ require_cmd ip
 require_cmd iptables
 require_cmd ip6tables
 require_cmd setpriv
+require_cmd pkill
 require_cmd unshare
 require_cmd curl
 require_cmd python3
