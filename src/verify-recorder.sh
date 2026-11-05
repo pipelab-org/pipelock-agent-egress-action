@@ -56,6 +56,31 @@ verify_recorder() {
   fi
 }
 
+export_recorder_shards() {
+  # Flatten the proxy session's shards, in sequence order, into the packet
+  # copy. Shards are named evidence-<session>-<seq>.jsonl, where the session
+  # is everything before the last dash. Pipelock before 3.6 records session
+  # "proxy"; 3.6 and later record one "proxy.run.<hex>" session per process
+  # start. Anything else in the directory is not part of this chain.
+  sudo python3 -I - "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" <<'PY' || true
+import os
+import re
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+shard = re.compile(r"evidence-(proxy|proxy\.run\.[0-9a-f]+)-([0-9]+)\.jsonl")
+found = []
+for name in os.listdir(src):
+    m = shard.fullmatch(name)
+    if m and os.path.isfile(os.path.join(src, name)) and not os.path.islink(os.path.join(src, name)):
+        found.append((m.group(1), int(m.group(2)), name))
+with open(dst, "wb") as out:
+    for _, _, name in sorted(found):
+        with open(os.path.join(src, name), "rb") as fh:
+            out.write(fh.read())
+PY
+}
+
 finalize_recorder() {
   # Stop and reap the writer before exporting or verifying: clean shutdown
   # writes the transcript root and trailing checkpoint that prove its end.
@@ -64,7 +89,7 @@ finalize_recorder() {
     VERIFIER_VERDICT="error"
     printf 'no evidence directory found: %s\n' "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT"
   else
-    sudo sh -c 'cat "$1"/evidence-proxy-*.jsonl > "$2" 2>/dev/null' sh "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" || true
+    export_recorder_shards
     sudo chown "$(id -u):$(id -g)" "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
     sudo chmod 0600 "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
     if [[ ! -s "$EVIDENCE_EXPORT" ]]; then

@@ -8,6 +8,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Pipelock 3.6+ names each process run's shard evidence-proxy.run.<hex>-<seq>.jsonl.
+RUN_SHARD = "evidence-proxy.run.0f1e2d3c4b5a-0.jsonl"
 
 
 class VerifyRecorderTests(unittest.TestCase):
@@ -17,7 +19,7 @@ class VerifyRecorderTests(unittest.TestCase):
         self.work = Path(self.temp.name)
         self.evidence = self.work / "evidence with spaces"
         self.evidence.mkdir()
-        (self.evidence / "evidence-proxy-run.jsonl").write_text("closed\n")
+        (self.evidence / RUN_SHARD).write_text("closed\n")
         self.bin = self.work / "bin"
         self.bin.mkdir()
         self.write_executable("sudo", '#!/usr/bin/env bash\nexec "$@"\n')
@@ -29,7 +31,7 @@ if [[ "$*" == 'verify-receipt --help' ]]; then
 fi
 printf '%s\\0' "$@" >"$ARGV_LOG"
 # A verifier must see the final write, not the running writer's prefix.
-grep -q '^closed$' "$EVIDENCE_DIR/evidence-proxy-run.jsonl"
+grep -q '^closed$' "$EVIDENCE_DIR/$RUN_SHARD"
 printf 'stub verifier status %s\\n' "$VERIFY_STATUS"
 exit "$VERIFY_STATUS"
 ''')
@@ -47,6 +49,7 @@ exit "$VERIFY_STATUS"
             HELP_STATUS="0",
             VERIFY_STATUS="0",
             ARGV_LOG=str(self.work / "argv"),
+            RUN_SHARD=RUN_SHARD,
             HELPER=str(ROOT / "src/verify-recorder.sh"),
         )
 
@@ -128,11 +131,35 @@ printf '%s\\n' "$VERIFIER_VERDICT"
     def test_missing_or_empty_evidence_is_error(self):
         for missing in (False, True):
             with self.subTest(missing=missing):
-                (self.evidence / "evidence-proxy-run.jsonl").unlink(missing_ok=True)
+                (self.evidence / RUN_SHARD).unlink(missing_ok=True)
                 if missing:
                     self.evidence.rmdir()
                 self.assertEqual(self.run_finalizer(), "error")
                 self.assertFalse((self.work / "argv").exists())
+
+    def test_export_orders_proxy_shards_and_skips_other_files(self):
+        (self.evidence / RUN_SHARD).unlink()
+        shards = {
+            "evidence-proxy-0.jsonl": "legacy0\n",
+            "evidence-proxy-2.jsonl": "legacy2\n",
+            "evidence-proxy-10.jsonl": "legacy10\n",
+            "evidence-proxy.run.0f1e-0.jsonl": "run0\n",
+            "evidence-proxy.run.0f1e-10.jsonl": "run10\n",
+            "evidence-proxy.run.0f1e-2.jsonl": "run2\n",
+            # Not this chain: another session, an evil dash-split session,
+            # a non-hex run suffix, a sidecar, and a symlinked shard.
+            "evidence-other-0.jsonl": "other\n",
+            "evidence-proxy-evil-1.jsonl": "evil\n",
+            "evidence-proxy.run.XYZ-0.jsonl": "badrun\n",
+            "evidence-proxy-0.raw.enc": "sidecar\n",
+        }
+        for name, body in shards.items():
+            (self.evidence / name).write_text(body)
+        (self.evidence / "evidence-proxy-3.jsonl").symlink_to(self.evidence / "evidence-other-0.jsonl")
+        self.env["VERIFY_STATUS"] = "1"  # the stub verifier needs RUN_SHARD; only the export is under test
+        self.run_finalizer()
+        self.assertEqual((self.work / "export.jsonl").read_text(),
+                         "legacy0\nlegacy2\nlegacy10\nrun0\nrun2\nrun10\n")
 
     def test_stop_reaps_writer_before_export_and_verification(self):
         writer = self.work / "writer.py"
@@ -140,7 +167,7 @@ printf '%s\\n' "$VERIFIER_VERDICT"
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1]) / "evidence-proxy-run.jsonl"
+path = Path(sys.argv[1]) / sys.argv[2]
 def close(signum, frame):
     path.write_text("closed\\n")
     sys.exit(0)
@@ -154,7 +181,7 @@ while True:
         os.mkfifo(fifo)
         self.env.update(WRITER=str(writer), READY_PIPE=str(fifo))
         self.assertEqual(self.run_finalizer('''
-python3 "$WRITER" "$EVIDENCE_DIR" >"$READY_PIPE" &
+python3 "$WRITER" "$EVIDENCE_DIR" "$RUN_SHARD" >"$READY_PIPE" &
 PIPELOCK_PID=$!
 read -r ready <"$READY_PIPE"
 [[ "$ready" == ready ]]
