@@ -11,13 +11,18 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # The ubuntu-26.04 image behind ubuntu-latest fails the Action's root
+    # key-readability check before any proxied work runs; tracked separately.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Test recorder finalization
+        run: python3 -m unittest discover -s tests -v
 
       - name: Checkout Pipelock
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

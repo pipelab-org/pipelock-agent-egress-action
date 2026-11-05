@@ -6,6 +6,9 @@ AGENT_USER="pipelock-agent"
 HOST_USER="pipelock-host"
 AGENT_NAME="action-ephemeral"
 RUN_SUFFIX="$$"
+# Tags this invocation's recorder so forced cleanup never touches another run's
+# processes under the shared host account.
+ACTION_RUN_MARKER="${GITHUB_RUN_ID:-local}.${GITHUB_RUN_ATTEMPT:-1}.$RUN_SUFFIX"
 NETNS="pipelock-agent-$RUN_SUFFIX"
 HOST_IF="plh$RUN_SUFFIX"
 AGENT_IF="pla$RUN_SUFFIX"
@@ -46,6 +49,9 @@ VERIFIER_OUTPUT=""
 EVIDENCE_EXPORT=""
 KEYGEN_OUTPUT=""
 PIPELOCK_PID=""
+RECORDER_PID=""
+RECORDER_START_TIME=""
+HOST_UID=""
 AGENT_EXIT_CODE=0
 VERIFIER_VERDICT="error"
 RECEIPT_COUNT=0
@@ -56,6 +62,8 @@ CREATED_AGENT_USER="false"
 CREATED_HOST_USER="false"
 SUDOERS_DENY_FILE=""
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=src/verify-recorder.sh
+source "$ACTION_DIR/src/verify-recorder.sh"
 
 usage() {
   cat <<'EOF'
@@ -105,18 +113,18 @@ bool_input() {
 
 cleanup() {
   set +e
-  if [[ -n "$PIPELOCK_PID" ]]; then
-    if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-      sudo kill "$PIPELOCK_PID" >/dev/null 2>&1
-      for _ in $(seq 1 25); do
-        sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1 || break
-        sleep 0.2
-      done
-      if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-        sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
-      fi
+  if ! stop_pipelock; then
+    # Evidence was already refused; teardown still has to happen so signing
+    # keys, users and sudoers entries never outlive the run. Stop every
+    # host-user process tagged with this invocation's marker, even one whose
+    # identity could not be captured, without touching another invocation.
+    note "recorder shutdown unconfirmed; forcing this run's host-user processes down before teardown"
+    if [[ -n "$PIPELOCK_PID" ]]; then
+      sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
     fi
-    wait "$PIPELOCK_PID" >/dev/null 2>&1
+    if [[ -n "$HOST_UID" ]]; then
+      kill_marked_processes "$HOST_UID" "$ACTION_RUN_MARKER" >/dev/null 2>&1
+    fi
   fi
   sudo ip netns del "$NETNS" >/dev/null 2>&1
   sudo ip link del "$HOST_IF" >/dev/null 2>&1
@@ -452,7 +460,7 @@ setup_network_boundary() {
 
 setup_network_boundary
 
-sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" setpriv \
+sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" PIPELOCK_EGRESS_ACTION_RUN="$ACTION_RUN_MARKER" setpriv \
   --reuid "$HOST_UID" \
   --regid "$HOST_GID" \
   --clear-groups \
@@ -464,6 +472,9 @@ sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" setpriv \
 PIPELOCK_PID="$!"
 
 for _ in $(seq 1 80); do
+  if [[ -z "$RECORDER_PID" ]]; then
+    capture_recorder_pid || true
+  fi
   if curl -fsS --max-time 1 "http://$HOST_IP:$PIPELOCK_PORT/health" >/dev/null 2>&1; then
     break
   fi
@@ -472,6 +483,10 @@ done
 if ! curl -fsS --max-time 2 "http://$HOST_IP:$PIPELOCK_PORT/health" >/dev/null 2>&1; then
   sed -n '1,120p' "$PIPELOCK_LOG" >&2 || true
   die "pipelock listener did not become healthy on $HOST_IP:$PIPELOCK_PORT"
+fi
+
+if [[ -z "$RECORDER_PID" ]]; then
+  die "could not identify the recorder child of the sudo launcher"
 fi
 
 run_agent_probe() {
@@ -577,41 +592,7 @@ if [[ "$AGENT_EXIT_CODE" -ne 0 ]]; then
   note "script exited with code $AGENT_EXIT_CODE; continuing to verify receipts"
 fi
 
-if ! sudo test -d "$EVIDENCE_DIR"; then
-  VERIFIER_VERDICT="error"
-  printf 'no evidence directory found: %s\n' "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT"
-else
-  sudo sh -c 'cat "$1"/evidence-proxy-*.jsonl > "$2" 2>/dev/null' sh "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" || true
-  sudo chown "$(id -u):$(id -g)" "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
-  sudo chmod 0600 "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
-  if [[ ! -s "$EVIDENCE_EXPORT" ]]; then
-    VERIFIER_VERDICT="error"
-    printf 'no_signed_receipts_emitted; signing_key_path not configured or pipelock not invoked\n' >"$VERIFIER_OUTPUT"
-  else
-    set +e
-    # `verify-receipt --chain` expects the raw evidence directory. EVIDENCE_EXPORT
-    # is the flattened copy carried in the Audit Packet.
-    if [[ -n "$VERIFY_SIGNER_KEY" ]]; then
-      sudo "$RUNTIME_BIN" verify-receipt --chain "$EVIDENCE_DIR" --key "$VERIFY_SIGNER_KEY" >"$VERIFIER_OUTPUT" 2>&1
-      verify_status=$?
-      if [[ "$verify_status" -eq 0 && "$TRUSTED_VERIFICATION" == "true" ]]; then
-        VERIFIER_VERDICT="valid"
-      elif [[ "$verify_status" -eq 0 ]]; then
-        VERIFIER_VERDICT="self_consistent_only"
-      else
-        VERIFIER_VERDICT="invalid"
-      fi
-    else
-      sudo "$RUNTIME_BIN" verify-receipt --chain "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT" 2>&1
-      verify_status=$?
-      [[ "$verify_status" -eq 0 ]] && VERIFIER_VERDICT="self_consistent_only" || VERIFIER_VERDICT="invalid"
-    fi
-    if [[ "$VERIFIER_VERDICT" == "self_consistent_only" ]]; then
-      printf '\nWARNING: trusted evidence requires signer-public-key pinning; ephemeral signer proves chain self-consistency only.\n' >>"$VERIFIER_OUTPUT"
-    fi
-    set -e
-  fi
-fi
+finalize_recorder
 
 if [[ -s "$EVIDENCE_EXPORT" ]]; then
   RECEIPT_COUNT="$(python3 - "$EVIDENCE_EXPORT" <<'PY'
@@ -619,8 +600,14 @@ import json
 import sys
 
 count = 0
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    for line in fh:
+# A torn export can end inside a UTF-8 sequence; skip such a line like any
+# other malformed record instead of failing the step. audit-packet.sh matches.
+with open(sys.argv[1], "rb") as fh:
+    for raw in fh:
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
         if not line.strip():
             continue
         try:
