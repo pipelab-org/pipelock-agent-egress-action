@@ -59,6 +59,9 @@ PYPROC
 kill_marked_processes() {
   # SIGKILL processes owned by uid $1 whose environment carries this run's
   # PIPELOCK_EGRESS_ACTION_RUN marker $2; other invocations are left alone.
+  # Only the recorder and run.sh's own probes run as the host user. The agent
+  # runs as a different user with sudo denied and no_new_privs, so it cannot
+  # start or alter a host-user process to drop the marker.
   sudo python3 -I - "$1" "$2" <<'PYKILL'
 import os
 import signal
