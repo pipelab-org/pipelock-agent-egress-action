@@ -56,6 +56,8 @@ CREATED_AGENT_USER="false"
 CREATED_HOST_USER="false"
 SUDOERS_DENY_FILE=""
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=src/verify-recorder.sh
+source "$ACTION_DIR/src/verify-recorder.sh"
 
 usage() {
   cat <<'EOF'
@@ -105,19 +107,7 @@ bool_input() {
 
 cleanup() {
   set +e
-  if [[ -n "$PIPELOCK_PID" ]]; then
-    if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-      sudo kill "$PIPELOCK_PID" >/dev/null 2>&1
-      for _ in $(seq 1 25); do
-        sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1 || break
-        sleep 0.2
-      done
-      if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-        sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
-      fi
-    fi
-    wait "$PIPELOCK_PID" >/dev/null 2>&1
-  fi
+  stop_pipelock
   sudo ip netns del "$NETNS" >/dev/null 2>&1
   sudo ip link del "$HOST_IF" >/dev/null 2>&1
   if [[ -n "$RUNTIME_ROOT" ]]; then
@@ -577,41 +567,7 @@ if [[ "$AGENT_EXIT_CODE" -ne 0 ]]; then
   note "script exited with code $AGENT_EXIT_CODE; continuing to verify receipts"
 fi
 
-if ! sudo test -d "$EVIDENCE_DIR"; then
-  VERIFIER_VERDICT="error"
-  printf 'no evidence directory found: %s\n' "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT"
-else
-  sudo sh -c 'cat "$1"/evidence-proxy-*.jsonl > "$2" 2>/dev/null' sh "$EVIDENCE_DIR" "$EVIDENCE_EXPORT" || true
-  sudo chown "$(id -u):$(id -g)" "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
-  sudo chmod 0600 "$EVIDENCE_EXPORT" >/dev/null 2>&1 || true
-  if [[ ! -s "$EVIDENCE_EXPORT" ]]; then
-    VERIFIER_VERDICT="error"
-    printf 'no_signed_receipts_emitted; signing_key_path not configured or pipelock not invoked\n' >"$VERIFIER_OUTPUT"
-  else
-    set +e
-    # `verify-receipt --chain` expects the raw evidence directory. EVIDENCE_EXPORT
-    # is the flattened copy carried in the Audit Packet.
-    if [[ -n "$VERIFY_SIGNER_KEY" ]]; then
-      sudo "$RUNTIME_BIN" verify-receipt --chain "$EVIDENCE_DIR" --key "$VERIFY_SIGNER_KEY" >"$VERIFIER_OUTPUT" 2>&1
-      verify_status=$?
-      if [[ "$verify_status" -eq 0 && "$TRUSTED_VERIFICATION" == "true" ]]; then
-        VERIFIER_VERDICT="valid"
-      elif [[ "$verify_status" -eq 0 ]]; then
-        VERIFIER_VERDICT="self_consistent_only"
-      else
-        VERIFIER_VERDICT="invalid"
-      fi
-    else
-      sudo "$RUNTIME_BIN" verify-receipt --chain "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT" 2>&1
-      verify_status=$?
-      [[ "$verify_status" -eq 0 ]] && VERIFIER_VERDICT="self_consistent_only" || VERIFIER_VERDICT="invalid"
-    fi
-    if [[ "$VERIFIER_VERDICT" == "self_consistent_only" ]]; then
-      printf '\nWARNING: trusted evidence requires signer-public-key pinning; ephemeral signer proves chain self-consistency only.\n' >>"$VERIFIER_OUTPUT"
-    fi
-    set -e
-  fi
-fi
+finalize_recorder
 
 if [[ -s "$EVIDENCE_EXPORT" ]]; then
   RECEIPT_COUNT="$(python3 - "$EVIDENCE_EXPORT" <<'PY'
