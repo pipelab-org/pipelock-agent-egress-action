@@ -68,12 +68,25 @@ import re
 import sys
 
 src, dst = sys.argv[1], sys.argv[2]
-shard = re.compile(r"evidence-(proxy|proxy\.run\.[0-9a-f]+)-([0-9]+)\.jsonl")
+session_pattern = re.compile(r"proxy(?:\.run\.[0-9a-f]+)?")
 found = []
 for name in os.listdir(src):
-    m = shard.fullmatch(name)
-    if m and os.path.isfile(os.path.join(src, name)) and not os.path.islink(os.path.join(src, name)):
-        found.append((m.group(1), int(m.group(2)), name))
+    if not name.startswith("evidence-") or not name.endswith(".jsonl"):
+        continue
+    session, sep, tail = name[len("evidence-"):-len(".jsonl")].rpartition("-")
+    if not sep or not session_pattern.fullmatch(session):
+        continue
+    # internal/evidencename.Parse uses Go's uint64 decimal parser and maps
+    # invalid or overflowing tails to zero; ties sort by basename.
+    digits = tail.lstrip("0") or "0"
+    seq = 0
+    if re.fullmatch(r"[0-9]+", tail) and len(digits) <= 20:
+        parsed = int(digits)
+        if parsed <= (1 << 64) - 1:
+            seq = parsed
+    path = os.path.join(src, name)
+    if os.path.isfile(path) and not os.path.islink(path):
+        found.append((session, seq, name))
 with open(dst, "wb") as out:
     for _, _, name in sorted(found):
         with open(os.path.join(src, name), "rb") as fh:

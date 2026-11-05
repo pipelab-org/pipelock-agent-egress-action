@@ -161,6 +161,25 @@ printf '%s\\n' "$VERIFIER_VERDICT"
         self.assertEqual((self.work / "export.jsonl").read_text(),
                          "legacy0\nlegacy2\nlegacy10\nrun0\nrun2\nrun10\n")
 
+    def test_export_uses_parser_tolerance_and_uint64_sequence_order(self):
+        (self.evidence / RUN_SHARD).unlink()
+        shards = {
+            "evidence-proxy-2.jsonl": "two\n",
+            "evidence-proxy-99999999999999999999.jsonl": "overflow\n",
+            "evidence-proxy-abc.jsonl": "nonnumeric\n",
+            "evidence-proxy-+0.jsonl": "plus\n",
+            "evidence-proxy-.jsonl": "empty\n",
+            "evidence-proxy-18446744073709551615.jsonl": "max\n",
+            "evidence-proxy.run.0f1e-0001.jsonl": "run-one\n",
+            "evidence-proxy.run.abcd-0.jsonl": "other-run\n",
+        }
+        for name, body in shards.items():
+            (self.evidence / name).write_text(body)
+        self.env["VERIFY_STATUS"] = "1"
+        self.run_finalizer()
+        self.assertEqual((self.work / "export.jsonl").read_text(),
+                         "plus\nempty\noverflow\nnonnumeric\ntwo\nmax\nrun-one\nother-run\n")
+
     def test_export_failure_never_verifies_partial_or_stale_evidence(self):
         for partial in (False, True):
             with self.subTest(partial=partial):
