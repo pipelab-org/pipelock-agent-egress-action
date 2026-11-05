@@ -4,21 +4,108 @@
 # VERIFIER_VERDICT is consumed by run.sh after this sourced helper returns.
 # shellcheck disable=SC2034
 
+# Linux proc(5): stat field 22 is the process start time; a zombie cannot write.
+# Keep it with the PID so a reused PID is never treated as our recorder.
+recorder_process() {
+  sudo python3 -I - "$1" "$PIPELOCK_PID" "$RUNTIME_BIN" "${RECORDER_PID:-}" "${RECORDER_START_TIME:-}" <<'PYPROC'
+import os
+from pathlib import Path
+import sys
+
+action, launcher, binary, recorder, started = sys.argv[1:]
+
+def state(pid):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return fields[0], fields[19]
+
+try:
+    if action == "capture":
+        children = Path(f"/proc/{launcher}/task/{launcher}/children").read_text().split()
+        matches = []
+        for pid in children:
+            try:
+                before = state(pid)
+                if os.path.samefile(f"/proc/{pid}/exe", binary):
+                    if state(pid) == before and before[0] != "Z":
+                        matches.append((pid, before[1]))
+            except FileNotFoundError:
+                continue
+        if len(matches) != 1:
+            sys.exit(2)
+        print(*matches[0])
+    else:
+        current, birth = state(recorder)
+        print("stopped" if birth != started or current == "Z" else "running")
+except FileNotFoundError:
+    if action == "status":
+        print("stopped")
+    else:
+        sys.exit(2)
+except (OSError, ValueError, IndexError):
+    sys.exit(2)
+PYPROC
+}
+
+capture_recorder_pid() {
+  local identity
+  if ! identity="$(recorder_process capture)"; then
+    return 1
+  fi
+  read -r RECORDER_PID RECORDER_START_TIME <<<"$identity"
+}
+
+recorder_running() {
+  local state
+  # sudo and Python failures must never masquerade as a confirmed exit.
+  if ! state="$(recorder_process status)"; then
+    return 2
+  fi
+  case "$state" in
+    running) return 0 ;;
+    stopped) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 stop_pipelock() {
-  if [[ -n "$PIPELOCK_PID" ]]; then
-    if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-      sudo kill "$PIPELOCK_PID" >/dev/null 2>&1
+  local status
+  if [[ -z "$PIPELOCK_PID" ]]; then
+    return 0
+  fi
+  if [[ -z "${RECORDER_PID:-}" || -z "${RECORDER_START_TIME:-}" ]]; then
+    printf 'could not confirm recorder identity; refusing evidence export\n' >"$VERIFIER_OUTPUT"
+    return 1
+  fi
+  if recorder_running; then
+    # ESRCH between observation and signal is harmless; the status checks
+    # below, rather than kill's exit code, decide whether stopping succeeded.
+    sudo kill "$RECORDER_PID" >/dev/null 2>&1 || true
+    for _ in $(seq 1 25); do
+      recorder_running || break
+      sleep 0.2
+    done
+    if recorder_running; then
+      sudo kill -KILL "$RECORDER_PID" >/dev/null 2>&1 || true
+      # SIGKILL is asynchronous, so allow the kernel to finish the exit.
       for _ in $(seq 1 25); do
-        sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1 || break
+        recorder_running || break
         sleep 0.2
       done
-      if sudo kill -0 "$PIPELOCK_PID" >/dev/null 2>&1; then
-        sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
-      fi
     fi
-    wait "$PIPELOCK_PID" >/dev/null 2>&1 || true
-    PIPELOCK_PID=""
   fi
+  if recorder_running; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne 1 ]]; then
+    printf 'could not confirm recorder stopped; refusing evidence export\n' >"$VERIFIER_OUTPUT"
+    return 1
+  fi
+  wait "$PIPELOCK_PID" >/dev/null 2>&1 || true
+  PIPELOCK_PID=""
+  RECORDER_PID=""
+  RECORDER_START_TIME=""
 }
 
 verify_recorder() {
@@ -90,14 +177,20 @@ for name in os.listdir(src):
 with open(dst, "wb") as out:
     for _, _, name in sorted(found):
         with open(os.path.join(src, name), "rb") as fh:
-            out.write(fh.read())
+            data = fh.read()
+            out.write(data)
+            if data and not data.endswith(b"\n"):
+                out.write(b"\n")
 PY
 }
 
 finalize_recorder() {
   # Stop and reap the writer before exporting or verifying: clean shutdown
   # writes the transcript root and trailing checkpoint that prove its end.
-  stop_pipelock
+  if ! stop_pipelock; then
+    VERIFIER_VERDICT="error"
+    return
+  fi
   if ! sudo test -d "$EVIDENCE_DIR"; then
     VERIFIER_VERDICT="error"
     printf 'no evidence directory found: %s\n' "$EVIDENCE_DIR" >"$VERIFIER_OUTPUT"

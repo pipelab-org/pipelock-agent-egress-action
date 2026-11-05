@@ -46,6 +46,8 @@ VERIFIER_OUTPUT=""
 EVIDENCE_EXPORT=""
 KEYGEN_OUTPUT=""
 PIPELOCK_PID=""
+RECORDER_PID=""
+RECORDER_START_TIME=""
 AGENT_EXIT_CODE=0
 VERIFIER_VERDICT="error"
 RECEIPT_COUNT=0
@@ -107,7 +109,10 @@ bool_input() {
 
 cleanup() {
   set +e
-  stop_pipelock
+  if ! stop_pipelock; then
+    note "recorder shutdown unconfirmed; preserving runtime resources for inspection"
+    return
+  fi
   sudo ip netns del "$NETNS" >/dev/null 2>&1
   sudo ip link del "$HOST_IF" >/dev/null 2>&1
   if [[ -n "$RUNTIME_ROOT" ]]; then
@@ -454,6 +459,9 @@ sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" setpriv \
 PIPELOCK_PID="$!"
 
 for _ in $(seq 1 80); do
+  if [[ -z "$RECORDER_PID" ]]; then
+    capture_recorder_pid || true
+  fi
   if curl -fsS --max-time 1 "http://$HOST_IP:$PIPELOCK_PORT/health" >/dev/null 2>&1; then
     break
   fi
@@ -462,6 +470,10 @@ done
 if ! curl -fsS --max-time 2 "http://$HOST_IP:$PIPELOCK_PORT/health" >/dev/null 2>&1; then
   sed -n '1,120p' "$PIPELOCK_LOG" >&2 || true
   die "pipelock listener did not become healthy on $HOST_IP:$PIPELOCK_PORT"
+fi
+
+if [[ -z "$RECORDER_PID" ]]; then
+  die "could not identify the recorder child of the sudo launcher"
 fi
 
 run_agent_probe() {

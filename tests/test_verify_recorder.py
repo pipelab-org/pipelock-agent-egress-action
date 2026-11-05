@@ -1,6 +1,9 @@
 """Exercise the production finalizer without users, sudo or network namespaces."""
 
+import json
 import os
+import signal
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -55,6 +58,11 @@ exit "$VERIFY_STATUS"
 
     def write_executable(self, name, content):
         path = self.bin / name
+        if name == "sudo":
+            content = content.replace('exec "$@"', '''if [[ "$1" == "$RUNTIME_BIN" && "${2:-}" == verify-receipt && -n "${BASH_VERIFIER:-}" ]]; then
+  exec "$BASH_VERIFIER" "${@:2}"
+fi
+exec "$@"''')
         path.write_text(content)
         path.chmod(0o700)
 
@@ -62,10 +70,10 @@ exit "$VERIFY_STATUS"
         result = subprocess.run(
             ["bash", "-c", '''set -Eeuo pipefail
 source "$HELPER"
-trap stop_pipelock EXIT
+trap 'stop_pipelock || true' EXIT
 ''' + prelude + '''
 finalize_recorder
-[[ -z "$PIPELOCK_PID" ]]
+[[ -z "$PIPELOCK_PID" || "$VERIFIER_VERDICT" == error ]]
 printf '%s\\n' "$VERIFIER_VERDICT"
 '''],
             env=self.env, text=True, capture_output=True, timeout=15,
@@ -201,31 +209,208 @@ exec "$@"
                 self.assertIn("simulated export failure", output)
                 self.assertIn("could not export recorder shards", output)
 
-    def test_stop_reaps_writer_before_export_and_verification(self):
-        writer = self.work / "writer.py"
-        writer.write_text('''import signal
+    def start_launcher(self, *, ignore_term=False, capture=True):
+        writer = self.bin / "recorder"
+        writer.write_text('''#!/usr/bin/env python3
+import os
+import signal
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1]) / sys.argv[2]
+path = Path(os.environ["EVIDENCE_DIR"]) / os.environ["RUN_SHARD"]
 def close(signum, frame):
     path.write_text("closed\\n")
     sys.exit(0)
-signal.signal(signal.SIGTERM, close)
-path.write_text("open\\n")
-print("ready", flush=True)
+signal.signal(signal.SIGTERM, signal.SIG_IGN if os.environ["IGNORE_TERM"] == "true" else close)
+Path(os.environ["CHILD_PID_FILE"]).write_text(str(os.getpid()))
+with open(os.environ["READY_PIPE"], "w") as ready:
+    ready.write("ready\\n")
 while True:
     signal.pause()
 ''')
+        writer.chmod(0o700)
+        launcher = self.work / "launcher.py"
+        launcher.write_text('''import os
+import signal
+import subprocess
+
+child = subprocess.Popen([os.environ["RUNTIME_BIN"], os.environ["WRITER"]])
+signal.signal(signal.SIGTERM, lambda signum, frame: child.send_signal(signum))
+child.wait()
+''')
         fifo = self.work / "ready"
         os.mkfifo(fifo)
-        self.env.update(WRITER=str(writer), READY_PIPE=str(fifo))
-        self.assertEqual(self.run_finalizer('''
-python3 "$WRITER" "$EVIDENCE_DIR" "$RUN_SHARD" >"$READY_PIPE" &
+        self.env.update(RUNTIME_BIN=os.path.realpath(sys.executable), WRITER=str(writer),
+                        BASH_VERIFIER=str(self.bin / "pipelock"),
+                        LAUNCHER=str(launcher), READY_PIPE=str(fifo),
+                        IGNORE_TERM="true" if ignore_term else "false",
+                        CHILD_PID_FILE=str(self.work / "child.pid"))
+
+        def cleanup_child():
+            pidfile = self.work / "child.pid"
+            if pidfile.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(cleanup_child)
+        return '''
+python3 "$LAUNCHER" >/dev/null 2>&1 &
 PIPELOCK_PID=$!
 read -r ready <"$READY_PIPE"
 [[ "$ready" == ready ]]
-'''), "valid")
+''' + ('''
+if declare -F capture_recorder_pid >/dev/null; then
+  capture_recorder_pid
+fi
+''' if capture else "")
+
+    def assert_child_stopped(self):
+        pid = int((self.work / "child.pid").read_text())
+        stat = Path(f"/proc/{pid}/stat")
+        self.assertTrue(not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z",
+                        "recorder child survived finalization")
+
+    def test_failed_signal_after_exit_does_not_abort_finalization(self):
+        prelude = self.start_launcher()
+        self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == kill && "$2" != -0 ]]; then
+  kill "${@:2}" 2>/dev/null || true
+  # Wait for actual exit, then reproduce ESRCH on the signal after the probe.
+  pid="${@: -1}"
+  for _ in $(seq 1 100); do
+    if ! kill -0 "$pid" 2>/dev/null; then exec kill "${@:2}"; fi
+    sleep 0.01
+  done
+  exit 98
+fi
+exec "$@"
+''')
+        self.assertEqual(self.run_finalizer(prelude), "valid")
+        self.assert_child_stopped()
+        self.assert_argv()
+
+    def test_failed_sigkill_after_exit_does_not_abort_finalization(self):
+        prelude = self.start_launcher(ignore_term=True) + '\ntrap - EXIT\n'
+        self.env["VERIFY_STATUS"] = "3"
+        self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == kill && "$2" == -KILL ]]; then
+  kill "${@:2}" 2>/dev/null || true
+  pid="${@: -1}"
+  for _ in $(seq 1 100); do
+    if ! kill -0 "$pid" 2>/dev/null; then exec kill "${@:2}"; fi
+    sleep 0.01
+  done
+  exit 98
+fi
+exec "$@"
+''')
+        self.assertEqual(self.run_finalizer(prelude), "invalid")
+        self.assert_child_stopped()
+        self.assert_argv()
+
+    def test_launcher_child_ignoring_term_is_stopped_before_export(self):
+        prelude = self.start_launcher(ignore_term=True) + '\ntrap - EXIT\n'
+        self.env["VERIFY_STATUS"] = "3"  # a forced exit has no signed end proof
+        self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == python3 && "$*" == *"$EVIDENCE_EXPORT"* ]]; then
+  pid=$(cat "$CHILD_PID_FILE")
+  if [[ -f /proc/$pid/stat ]] && [[ $(awk '{print $3}' "/proc/$pid/stat") != Z ]]; then
+    printf 'export attempted while recorder was alive\\n' >&2
+    exit 1
+  fi
+fi
+exec "$@"
+''')
+        self.assertEqual(self.run_finalizer(prelude), "invalid")
+        self.assert_child_stopped()
+        self.assert_argv()
+
+    def test_unstoppable_child_blocks_export_and_verification(self):
+        prelude = self.start_launcher(ignore_term=True)
+        self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == kill && "$2" != -0 ]]; then exit 1; fi
+exec "$@"
+''')
+        self.assertEqual(self.run_finalizer(prelude + '\ntrap - EXIT\n'), "error")
+        self.assertFalse((self.work / "export.jsonl").exists())
+        self.assertFalse((self.work / "argv").exists())
+        self.assertIn("could not confirm recorder stopped", (self.work / "verifier.txt").read_text())
+
+    def test_unidentified_child_blocks_export_and_verification(self):
+        prelude = self.start_launcher(ignore_term=True, capture=False)
+        self.assertEqual(self.run_finalizer(prelude + '\ntrap - EXIT\n'), "error")
+        self.assertFalse((self.work / "export.jsonl").exists())
+        self.assertFalse((self.work / "argv").exists())
+        self.assertIn("recorder identity", (self.work / "verifier.txt").read_text())
+
+    def assert_observation_failure_blocks_export(self, status):
+        prelude = self.start_launcher(ignore_term=True)
+        self.env["OBSERVATION_STATUS"] = str(status)
+        self.write_executable("sudo", '''#!/usr/bin/env bash
+if [[ "$1" == python3 && "${4:-}" == status ]]; then exit "$OBSERVATION_STATUS"; fi
+exec "$@"
+''')
+        self.assertEqual(self.run_finalizer(prelude + '''
+trap - EXIT
+if recorder_running; then exit 98; else [[ "$?" -eq 2 ]] || exit 99; fi
+'''), "error")
+        self.assertFalse((self.work / "export.jsonl").exists())
+        self.assertFalse((self.work / "argv").exists())
+        self.assertIn("could not confirm recorder stopped", (self.work / "verifier.txt").read_text())
+
+    def test_unobservable_child_blocks_export_and_verification(self):
+        self.assert_observation_failure_blocks_export(2)
+
+    def test_failed_sudo_probe_is_not_confirmation_of_exit(self):
+        self.assert_observation_failure_blocks_export(1)
+
+    def test_capture_rejects_child_with_wrong_executable(self):
+        prelude = self.start_launcher(ignore_term=True, capture=False)
+        self.assertEqual(self.run_finalizer(prelude + '''
+RUNTIME_BIN=/bin/false
+if capture_recorder_pid; then exit 99; fi
+trap - EXIT
+'''), "error")
+        self.assertFalse((self.work / "export.jsonl").exists())
+
+    def test_export_separates_unterminated_shards_and_counts_receipts(self):
+        (self.evidence / RUN_SHARD).unlink()
+        record = {"type": "action_receipt", "detail": {"action_record": {"verdict": "allow"}}}
+        first = json.dumps(record)
+        (self.evidence / "evidence-proxy-0.jsonl").write_text(first)
+        (self.evidence / "evidence-proxy-1.jsonl").write_text(first + "\n")
+        self.run_finalizer()
+        exported = (self.work / "export.jsonl").read_text()
+        self.assertEqual(exported, first + "\n" + first + "\n")
+        posture = self.work / "posture.json"
+        posture.write_text(json.dumps({
+            "enforcement_mode": "linux_namespace", "runner_os": "Linux",
+            "raw_socket_status": "denied", "docker_socket_status": "absent",
+            "dns_udp_status": "denied", "browser_proxy_status": "forced",
+            "websocket_frame_scanning": "explicit_ws_proxy_path_required",
+            "unsupported_paths": [],
+        }))
+        packet = self.work / "packet"
+        result = subprocess.run([
+            "bash", str(ROOT / "src/audit-packet.sh"),
+            "--receipt-chain", str(self.work / "export.jsonl"),
+            "--verifier-output", str(self.work / "verifier.txt"),
+            "--posture", str(posture), "--output-dir", str(packet),
+            "--run-started-at", "2026-11-05T00:00:00Z",
+            "--run-completed-at", "2026-11-05T00:01:00Z",
+            "--agent-identity", "test-recorder", "--agent-exit-code", "0",
+            "--verifier-verdict", "invalid",
+        ], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        audit = json.loads((packet / "packet.json").read_text())
+        self.assertEqual(audit["summary"]["receipt_count"], 2)
+        self.assertEqual(audit["verifier"]["receipt_count"], 2)
+
+    def test_stop_reaps_writer_before_export_and_verification(self):
+        (self.evidence / RUN_SHARD).write_text("open\n")
+        self.assertEqual(self.run_finalizer(self.start_launcher()), "valid")
+        self.assert_child_stopped()
         self.assertEqual((self.work / "export.jsonl").read_text(), "closed\n")
         self.assert_argv()
 
