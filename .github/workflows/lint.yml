@@ -28,14 +28,18 @@ jobs:
           # temp files on purpose; sudo elevates only the command. Excluding the check
           # globally is acceptable because every existing case is intentional, and
           # this repo does not otherwise create root-owned files via sudo redirect.
-          SHELLCHECK_OPTS: --exclude=SC2024
+          # -x follows run.sh's `shellcheck source=` directive, so variables the
+          # sourced src/verify-recorder.sh reads are not reported as unused.
+          SHELLCHECK_OPTS: -x --exclude=SC2024
         with:
           severity: warning
           scandir: ./src
 
   ruby-syntax:
     name: Ruby syntax check
-    runs-on: ubuntu-latest
+    # ruby/setup-ruby treats the ubuntu-26.04 image behind ubuntu-latest as an
+    # unsupported self-hosted runner and refuses to install Ruby there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout
