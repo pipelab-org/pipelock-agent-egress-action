@@ -414,6 +414,16 @@ trap - EXIT
         self.assertEqual(audit["summary"]["receipt_count"], 2)
         self.assertEqual(audit["verifier"]["receipt_count"], 2)
 
+    def test_forced_cleanup_kills_only_this_runs_marked_processes(self):
+        mine = subprocess.Popen(["sleep", "60"], env={**os.environ, "PIPELOCK_EGRESS_ACTION_RUN": "run.1.111"})
+        other = subprocess.Popen(["sleep", "60"], env={**os.environ, "PIPELOCK_EGRESS_ACTION_RUN": "run.1.222"})
+        self.addCleanup(lambda: [p.kill() for p in (mine, other) if p.poll() is None])
+        result = subprocess.run(["bash", "-c", 'source "$HELPER"; kill_marked_processes "$(id -u)" run.1.111'],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mine.wait(timeout=5), -9)
+        self.assertIsNone(other.poll(), "another invocation's process was killed")
+
     def test_torn_utf8_export_line_is_skipped_by_both_counters(self):
         record = {"type": "action_receipt", "detail": {"action_record": {"verdict": "allow"}}}
         export = self.work / "torn.jsonl"

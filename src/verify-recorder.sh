@@ -56,6 +56,34 @@ except (OSError, ValueError, IndexError):
 PYPROC
 }
 
+kill_marked_processes() {
+  # SIGKILL processes owned by uid $1 whose environment carries this run's
+  # PIPELOCK_EGRESS_ACTION_RUN marker $2; other invocations are left alone.
+  sudo python3 -I - "$1" "$2" <<'PYKILL'
+import os
+import signal
+import sys
+
+uid = int(sys.argv[1])
+marker = b"PIPELOCK_EGRESS_ACTION_RUN=" + sys.argv[2].encode()
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        if os.stat(f"/proc/{name}").st_uid != uid:
+            continue
+        with open(f"/proc/{name}/environ", "rb") as fh:
+            environ = fh.read().split(b"\0")
+    except OSError:
+        continue
+    if marker in environ:
+        try:
+            os.kill(int(name), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+PYKILL
+}
+
 capture_recorder_pid() {
   local identity
   if ! identity="$(recorder_process capture)"; then

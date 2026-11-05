@@ -6,6 +6,9 @@ AGENT_USER="pipelock-agent"
 HOST_USER="pipelock-host"
 AGENT_NAME="action-ephemeral"
 RUN_SUFFIX="$$"
+# Tags this invocation's recorder so forced cleanup never touches another run's
+# processes under the shared host account.
+ACTION_RUN_MARKER="${GITHUB_RUN_ID:-local}.${GITHUB_RUN_ATTEMPT:-1}.$RUN_SUFFIX"
 NETNS="pipelock-agent-$RUN_SUFFIX"
 HOST_IF="plh$RUN_SUFFIX"
 AGENT_IF="pla$RUN_SUFFIX"
@@ -112,14 +115,15 @@ cleanup() {
   set +e
   if ! stop_pipelock; then
     # Evidence was already refused; teardown still has to happen so signing
-    # keys, users and sudoers entries never outlive the run. The recorder runs
-    # as the action's host user, so stop everything that user still runs.
-    note "recorder shutdown unconfirmed; forcing host-user processes down before teardown"
+    # keys, users and sudoers entries never outlive the run. Stop every
+    # host-user process tagged with this invocation's marker, even one whose
+    # identity could not be captured, without touching another invocation.
+    note "recorder shutdown unconfirmed; forcing this run's host-user processes down before teardown"
     if [[ -n "$PIPELOCK_PID" ]]; then
       sudo kill -KILL "$PIPELOCK_PID" >/dev/null 2>&1
     fi
     if [[ -n "$HOST_UID" ]]; then
-      sudo pkill -KILL -u "$HOST_UID" >/dev/null 2>&1
+      kill_marked_processes "$HOST_UID" "$ACTION_RUN_MARKER" >/dev/null 2>&1
     fi
   fi
   sudo ip netns del "$NETNS" >/dev/null 2>&1
@@ -172,7 +176,6 @@ require_cmd ip
 require_cmd iptables
 require_cmd ip6tables
 require_cmd setpriv
-require_cmd pkill
 require_cmd unshare
 require_cmd curl
 require_cmd python3
@@ -457,7 +460,7 @@ setup_network_boundary() {
 
 setup_network_boundary
 
-sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" setpriv \
+sudo HOME="$HOST_HOME" USER="$HOST_USER" LOGNAME="$HOST_USER" PIPELOCK_EGRESS_ACTION_RUN="$ACTION_RUN_MARKER" setpriv \
   --reuid "$HOST_UID" \
   --regid "$HOST_GID" \
   --clear-groups \
