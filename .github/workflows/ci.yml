@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # The ubuntu-26.04 image behind ubuntu-latest fails the Action's root
+    # key-readability check before any proxied work runs; tracked separately.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout action
